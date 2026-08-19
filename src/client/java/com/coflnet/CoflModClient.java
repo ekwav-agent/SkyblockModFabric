@@ -714,26 +714,22 @@ public class CoflModClient implements ClientModInitializer {
      * Detects the Hypixel trade window. Multi-signal gate: 45-slot container,
      * title starts with "You", and the center divider column is glass panes.
      */
+    @Deprecated
     public static boolean isTradeScreen(ContainerScreen cs) {
         net.minecraft.world.Container container = cs.getMenu().getContainer();
-        if (container.getContainerSize() != 45) {
-            return false;
-        }
-        if (!cs.getTitle().getString().startsWith("You")) {
-            return false;
-        }
+        boolean[] dividerGlassPanes = new boolean[TRADE_DIVIDER_SLOTS.length];
+        int dividerIndex = 0;
         for (int slot : TRADE_DIVIDER_SLOTS) {
             ItemStack pane = container.getItem(slot);
             if (pane.isEmpty()) {
-                return false;
+                continue;
             }
             String key = net.minecraft.core.registries.BuiltInRegistries.ITEM
                     .getKey(pane.getItem()).getPath();
-            if (!key.contains("glass_pane")) {
-                return false;
-            }
+            dividerGlassPanes[dividerIndex++] = key.contains("glass_pane");
         }
-        return true;
+        return com.coflnet.core.MenuClassifier.isTradeMenu(
+                container.getContainerSize(), cs.getTitle().getString(), dividerGlassPanes);
     }
 
     /**
@@ -742,9 +738,10 @@ public class CoflModClient implements ClientModInitializer {
      * divider glass panes (Hypixel sends those a few ticks after the screen opens),
      * so the swap can fire on the very first init instead of lagging.
      */
+    @Deprecated
     public static boolean isTradeScreenByTitle(ContainerScreen cs) {
-        return cs.getMenu().getContainer().getContainerSize() == 45
-                && cs.getTitle().getString().startsWith("You");
+        return com.coflnet.core.MenuClassifier.isTradeTitle(
+                cs.getMenu().getContainer().getContainerSize(), cs.getTitle().getString());
     }
 
     /** Replace only a verified, active raw trade container with the custom overlay. */
@@ -764,14 +761,6 @@ public class CoflModClient implements ClientModInitializer {
     /** Worth basis selectable by the user (median vs lowest BIN). */
     public enum WorthBasis { LBIN, MEDIAN }
 
-    // these values are parsed after the existing description request completes.
-    private static final java.util.regex.Pattern LBIN_VALUE = java.util.regex.Pattern.compile(
-            "\\b(?:lbin|lowest\\s*bin)\\s*:?\\s*~?\\s*([\\d,]+(?:\\.\\d+)?(?:\\s*[kmb]\\b)?)",
-            java.util.regex.Pattern.CASE_INSENSITIVE);
-    private static final java.util.regex.Pattern MED_VALUE = java.util.regex.Pattern.compile(
-            "\\bmed(?:ian)?\\s*:?\\s*~?\\s*([\\d,]+(?:\\.\\d+)?(?:\\s*[kmb]\\b)?)",
-            java.util.regex.Pattern.CASE_INSENSITIVE);
-
     /**
      * Extracts a PER-ITEM coin worth from the backend tooltip lines.
      * <p>
@@ -781,50 +770,14 @@ public class CoflModClient implements ClientModInitializer {
      * value is what callers multiply by stack count. Returns null if neither a
      * matching AH nor bazaar line is present (truly unpriced).
      */
+    @Deprecated
     public static Long parseWorthFromTips(DescriptionHandler.DescModification[] tips, WorthBasis basis) {
-        if (tips == null) {
-            return null;
-        }
-        java.util.regex.Pattern label = (basis == WorthBasis.LBIN) ? LBIN_VALUE : MED_VALUE;
-        Long bazaar = null;
-        for (DescriptionHandler.DescModification t : tips) {
-            if (t == null || t.value == null) {
-                continue;
-            }
-            String plain = ChatFormatting.stripFormatting(t.value);
-            if (plain == null) {
-                continue;
-            }
-            plain = plain.trim();
-            // prefer the auction value when it is present.
-            java.util.regex.Matcher m = label.matcher(plain);
-            if (m.find()) {
-                Long v = parseCoinNumber(m.group(1));
-                if (v != null && v > 0) {
-                    return v;
-                }
-            }
-            // Bazaar line: "Buy: 37.49K (585.8 each)Sell: 33.38K (521.6 each)".
-            String lower = plain.toLowerCase(Locale.ROOT);
-            if (bazaar == null && (lower.contains("buy:") && lower.contains("each"))) {
-                bazaar = parseBazaarEach(plain, basis == WorthBasis.LBIN ? "buy" : "sell");
-            }
-        }
-        return bazaar; // null if no AH line matched and no bazaar line present
-    }
-
-    /**
-     * From a bazaar tip line, returns the per-unit "(N each)" value following
-     * the given side ("buy" or "sell"). Handles k/m/b suffixes and decimals.
-     */
-    private static Long parseBazaarEach(String plain, String side) {
-        java.util.regex.Matcher m = java.util.regex.Pattern
-                .compile(side + ":.*?\\(([\\d,.]+\\s*[kmb]?)\\s*each\\)", java.util.regex.Pattern.CASE_INSENSITIVE)
-                .matcher(plain);
-        if (m.find()) {
-            return parseCoinNumber(m.group(1));
-        }
-        return null;
+        String[] values = tips == null ? null : java.util.Arrays.stream(tips)
+                .map(tip -> tip == null ? null : tip.value).toArray(String[]::new);
+        return com.coflnet.core.TradeValuation.parseWorthFromTips(values,
+                basis == WorthBasis.LBIN
+                        ? com.coflnet.core.TradeValuation.WorthBasis.LBIN
+                        : com.coflnet.core.TradeValuation.WorthBasis.MEDIAN);
     }
 
     /**
@@ -859,52 +812,18 @@ public class CoflModClient implements ClientModInitializer {
      * OR abbreviated with a k/m/b suffix ("200k coins", "1.5m coins") — both must
      * be parsed or coin offers show as 0 value.
      */
+    @Deprecated
     public static Long parseCoinStack(ItemStack stack) {
         if (stack == null || stack.isEmpty()) {
             return null;
         }
-        String plain = ChatFormatting.stripFormatting(stack.getHoverName().getString());
-        if (plain == null) {
-            return null;
-        }
-        plain = plain.trim();
-        // Capture the leading number (with optional commas, decimal, and k/m/b suffix)
-        // followed by the word "coins".
-        java.util.regex.Matcher m = java.util.regex.Pattern
-                .compile("^([\\d,]*\\.?\\d+\\s*[kmb]?)\\s+coins$", java.util.regex.Pattern.CASE_INSENSITIVE)
-                .matcher(plain);
-        if (m.matches()) {
-            return parseCoinNumber(m.group(1));
-        }
-        return null;
+        return com.coflnet.core.TradeValuation.parseCoinOffer(stack.getHoverName().getString());
     }
 
     /** Parses a coin amount token like "200k", "1.5m", "1,234", "67". */
+    @Deprecated
     private static Long parseCoinNumber(String token) {
-        if (token == null) {
-            return null;
-        }
-        String in = token.toLowerCase(Locale.ROOT).replace(",", "").replace(" ", "").trim();
-        if (in.isEmpty()) {
-            return null;
-        }
-        try {
-            char last = in.charAt(in.length() - 1);
-            double mult = 1.0;
-            if (last == 'k') {
-                mult = 1_000.0;
-                in = in.substring(0, in.length() - 1);
-            } else if (last == 'm') {
-                mult = 1_000_000.0;
-                in = in.substring(0, in.length() - 1);
-            } else if (last == 'b') {
-                mult = 1_000_000_000.0;
-                in = in.substring(0, in.length() - 1);
-            }
-            return (long) (Double.parseDouble(in) * mult);
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        return com.coflnet.core.NumberParser.parseCoinNumber(token);
     }
 
     /**
@@ -912,8 +831,18 @@ public class CoflModClient implements ClientModInitializer {
      * other items are priced via their backend worth line (× stack count).
      * @return [totalWorth, unpricedItemCount]
      */
+    @Deprecated
     public static long[] valuateTradeSide(net.minecraft.world.Container container, int[] slots, WorthBasis basis) {
-        var value = com.coflnet.gui.trade.TradePriceCache.valueSlots(container, slots, basis, true);
+        java.util.List<Long> offeredValues = new java.util.ArrayList<>();
+        for (int slot : slots) {
+            if (slot < 0 || slot >= container.getContainerSize()) continue;
+            ItemStack stack = container.getItem(slot);
+            if (stack.isEmpty()) continue;
+            Long coins = parseCoinStack(stack);
+            offeredValues.add(coins != null ? coins
+                    : com.coflnet.gui.trade.TradePriceCache.stackWorth(stack, basis));
+        }
+        var value = com.coflnet.core.TradeValuation.sum(offeredValues);
         return new long[]{value.total(), value.unpriced()};
     }
 
@@ -1612,14 +1541,9 @@ public class CoflModClient implements ClientModInitializer {
      * allow-list in SkyUserState's {@code StorageListener.IsNotStorage} so we only resend real
      * storage (backpacks, ender chests, island chests, furniture, hunting menus) on close.
      */
+    @Deprecated
     public static boolean isStorageChest(String title) {
-        if (title == null)
-            return false;
-        return title.startsWith("Ender Chest")
-                || title.contains("Backpack (Slot")
-                || title.equals("Chest") || title.equals("Large Chest") // island chests
-                || title.equals("Chest Storage") || title.equals("Medium Shelves") || title.contains("Chest+") // furniture
-                || title.contains("Huntaxe") || title.startsWith("Hunting Toolkit"); // hunting menus
+        return com.coflnet.core.MenuClassifier.isStorageChest(title);
     }
 
     private static List<String> getScoreboard() {
@@ -1968,19 +1892,11 @@ public class CoflModClient implements ClientModInitializer {
         }
     }
 
+    @Deprecated
     private static Pair<String, String> getRelevantLinesFromScoreboard(String[] scores){
-        String leftVal = "";
-        String rightVal = "null";
-
-        for (String score : scores) {
-            if (score.startsWith("Purse: ") || score.startsWith("Piggy: ")) leftVal = score;
-            // Hypixel renders the area marker either as the benzene ring ⏣ (U+23E3) or,
-            // on newer clients, a private-use font glyph (U+E067). Match both or location
-            // changes stop triggering scoreboard uploads.
-            if (score.startsWith(" ⏣ ") || score.startsWith("  ")) rightVal = score;
-        }
-
-        return new Pair<>(leftVal, rightVal);
+        com.coflnet.core.ScoreboardParser.Values values =
+                com.coflnet.core.ScoreboardParser.getRelevantLines(scores);
+        return new Pair<>(values.left(), values.right());
     }
 
     public static String findPriceSuggestion(){
@@ -2102,61 +2018,14 @@ public class CoflModClient implements ClientModInitializer {
      * @return the parsed amount as a long
      * @throws NumberFormatException if the string cannot be parsed
      */
+    @Deprecated
     private static long parseAmountString(String amountStr) throws NumberFormatException {
-        if (amountStr == null || amountStr.trim().isEmpty()) {
-            throw new NumberFormatException("Empty amount string");
-        }
-        
-        String input = amountStr.trim().toLowerCase();
-        
-        // Handle plain numbers first
-        if (input.matches("^[0-9]+$")) {
-            return Long.parseLong(input);
-        }
-        
-        // Handle numbers with decimal points (e.g., "1.5")
-        if (input.matches("^[0-9]+\\.[0-9]+$")) {
-            return (long) (Double.parseDouble(input));
-        }
-        
-        // Handle suffixed numbers
-        if (input.matches("^[0-9]+\\.?[0-9]*[kmb]$")) {
-            char suffix = input.charAt(input.length() - 1);
-            String numberPart = input.substring(0, input.length() - 1);
-            
-            double value;
-            try {
-                value = Double.parseDouble(numberPart);
-            } catch (NumberFormatException e) {
-                throw new NumberFormatException("Invalid number part: " + numberPart);
-            }
-            
-            switch (suffix) {
-                case 'k':
-                    return (long) (value * 1_000);
-                case 'm':
-                    return (long) (value * 1_000_000);
-                case 'b':
-                    return (long) (value * 1_000_000_000);
-                default:
-                    throw new NumberFormatException("Invalid suffix: " + suffix);
-            }
-        }
-        
-        // If we get here, the format is not recognized
-        throw new NumberFormatException("Invalid format: " + amountStr + ". Use formats like: 1000, 2k, 3m, 1.5b");
+        return com.coflnet.core.NumberParser.parseAmount(amountStr);
     }
 
+    @Deprecated
     private static String formatCoins(long coins) {
-        if (coins >= 1000000000) {
-            return String.format(java.util.Locale.US, "%.1fB", coins / 1000000000.0);
-        } else if (coins >= 1000000) {
-            return String.format(java.util.Locale.US, "%.1fM", coins / 1000000.0);
-        } else if (coins >= 1000) {
-            return String.format(java.util.Locale.US, "%.1fK", coins / 1000.0);
-        } else {
-            return String.valueOf(coins);
-        }
+        return com.coflnet.core.CoinFormatter.format(coins);
     }
 
     private static void sendChatMessage(String message) {
@@ -2436,75 +2305,19 @@ public class CoflModClient implements ClientModInitializer {
         }
     }
 
+    @Deprecated
     private static String extractConnectHost(String destination) {
-        String normalizedDestination = normalizeConnectHost(destination);
-        if (normalizedDestination == null) {
-            return null;
-        }
-
-        try {
-            URI uri = URI.create(normalizedDestination.contains("://") ? normalizedDestination : "wss://" + normalizedDestination);
-            String parsedHost = normalizeConnectHost(uri.getHost());
-            if (parsedHost != null) {
-                return parsedHost;
-            }
-        } catch (IllegalArgumentException ignored) {
-            // Fall back to manual parsing below.
-        }
-
-        String hostCandidate = normalizedDestination;
-        int pathIndex = hostCandidate.indexOf('/');
-        if (pathIndex >= 0) {
-            hostCandidate = hostCandidate.substring(0, pathIndex);
-        }
-
-        int queryIndex = hostCandidate.indexOf('?');
-        if (queryIndex >= 0) {
-            hostCandidate = hostCandidate.substring(0, queryIndex);
-        }
-
-        int fragmentIndex = hostCandidate.indexOf('#');
-        if (fragmentIndex >= 0) {
-            hostCandidate = hostCandidate.substring(0, fragmentIndex);
-        }
-
-        int credentialsIndex = hostCandidate.lastIndexOf('@');
-        if (credentialsIndex >= 0) {
-            hostCandidate = hostCandidate.substring(credentialsIndex + 1);
-        }
-
-        if (hostCandidate.startsWith("[")) {
-            int closingBracketIndex = hostCandidate.indexOf(']');
-            if (closingBracketIndex > 0) {
-                hostCandidate = hostCandidate.substring(1, closingBracketIndex);
-            }
-        } else {
-            int portSeparatorIndex = hostCandidate.indexOf(':');
-            if (portSeparatorIndex >= 0) {
-                hostCandidate = hostCandidate.substring(0, portSeparatorIndex);
-            }
-        }
-
-        return normalizeConnectHost(hostCandidate);
+        return com.coflnet.core.ConnectHostValidator.extractHost(destination);
     }
 
+    @Deprecated
     private static boolean isTrustedConnectHost(String host) {
-        String normalizedHost = normalizeConnectHost(host);
-        return normalizedHost != null
-                && (normalizedHost.equals("coflnet.com") || normalizedHost.endsWith(".coflnet.com"));
+        return com.coflnet.core.ConnectHostValidator.isTrusted(host);
     }
 
+    @Deprecated
     private static String normalizeConnectHost(String value) {
-        if (value == null) {
-            return null;
-        }
-
-        String normalizedValue = value.trim().toLowerCase(Locale.ROOT);
-        while (normalizedValue.endsWith(".")) {
-            normalizedValue = normalizedValue.substring(0, normalizedValue.length() - 1);
-        }
-
-        return normalizedValue.isEmpty() ? null : normalizedValue;
+        return com.coflnet.core.ConnectHostValidator.normalize(value);
     }
 
     private static void applyServerContext(ServerContext serverContext) {
@@ -2534,24 +2347,9 @@ public class CoflModClient implements ClientModInitializer {
         return ServerContext.UNKNOWN;
     }
 
+    @Deprecated
     private static boolean containsHypixelScoreboard(String[] scores) {
-        if (scores == null) {
-            return false;
-        }
-        for (String score : scores) {
-            if (normalizeScoreboardLine(score).endsWith("hypixel.net")) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static String normalizeScoreboardLine(String score) {
-        String stripped = ChatFormatting.stripFormatting(score);
-        if (stripped == null) {
-            return "";
-        }
-        return stripped.replace('\u00A0', ' ').trim().toLowerCase(Locale.ROOT);
+        return com.coflnet.core.ScoreboardParser.containsHypixelFooter(scores);
     }
 
     private static void runOnClientThread(Runnable action) {
