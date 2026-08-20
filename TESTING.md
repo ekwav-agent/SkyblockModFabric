@@ -12,4 +12,4 @@ JAVA_HOME=/usr/lib/jvm/temurin-25-jdk-amd64 ./gradlew --no-daemon test
 
 ## Regression baseline
 
-On the pinned base commit these tests fail during `compileTestJava`, because the asserted `com.coflnet.core` classes do not exist and the logic is still inline in `CoflModClient`. With this extraction, all eight regression classes compile and pass under `./gradlew --no-daemon test`.
+On the pinned base commit these tests fail during `compileTestJava`, because the asserted `com.coflnet.core` classes do not exist and the logic is still inline in `CoflModClient`. With this extraction, the core regression suite compiles and passes under `./gradlew --no-daemon test`.
