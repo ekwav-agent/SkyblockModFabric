@@ -1042,7 +1042,21 @@ public class CoflModClient implements ClientModInitializer {
                 .executes(context -> {
                     String[] args = context.getArgument("args", String.class).split(" ");
                     
-                    // Toggle developer mode (shows the Copy Dump button in containers)
+                    // Preserve CoflSkyCore's original bare /cofl dev command, which
+                    // switches both the API and ModSocket between local and production.
+                    if (args.length == 1 && args[0].equalsIgnoreCase("dev")) {
+                        String usernameSnapshot = username;
+                        runConnectionLifecycleTask("toggle developer connection", () -> {
+                            if (Config.BaseUrl.contains("localhost")) {
+                                CoflCore.getWrapper().stop();
+                            }
+                            CoflSkyCommand.dev(usernameSnapshot);
+                            CoflCore.CommandUri = Config.BaseUrl + "/api/mod/commands";
+                        });
+                        return 1;
+                    }
+
+                    // /cofl dev on|off controls the Copy Dump button in containers.
                     if (args.length >= 1 && args[0].equalsIgnoreCase("dev")) {
                         if (args.length >= 2 && (args[1].equalsIgnoreCase("on") || args[1].equalsIgnoreCase("off"))) {
                             boolean enabled = args[1].equalsIgnoreCase("on");
