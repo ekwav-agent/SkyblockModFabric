@@ -8,6 +8,17 @@ Run the unit tests locally with:
 JAVA_HOME=/usr/lib/jvm/temurin-25-jdk-amd64 ./gradlew --no-daemon test
 ```
 
+The `testserver` subproject is included in both `test` and `build`. Its tests
+lock the schema-1 scenario order, exact `main` branch dependency tuple, stable
+observation labels, and the production `MenuClassifier`/`ScoreboardParser`
+seams. `verifyScenarioJar` also rejects any resource outside the minimal
+manifest, `fabric.mod.json`, owned scenario classes, and scenario index.
+
+The resulting server-side scenario mod is
+`testserver/build/libs/skycofl-scenario-server.jar`. It is not a Minecraft or
+Fabric runtime and cannot be run standalone; licensed runtime validation is a
+separate host-owned gate.
+
 `CorePurityTest` scans both the Java sources and compiled classes in `com.coflnet.core`. It fails if any core class references `net.minecraft` or `com.mojang`, keeping the extracted logic runnable without a Minecraft client.
 
 ## Regression baseline
