@@ -37,6 +37,7 @@ class FixtureLoaderTest {
     void clearFixtureSelection() {
         System.clearProperty("skycofl.fixtures");
         System.clearProperty("coflnet.scenario.selected_id");
+        System.clearProperty("coflnet.scenario.fixture_sha256");
     }
 
     @Test
@@ -46,6 +47,18 @@ class FixtureLoaderTest {
         assertEquals("Bazaar ➜ Products", menu.title());
         assertEquals("default:bazaar-menu", menu.digest());
         assertSame(Items.EMERALD, menu.items().get(13).getItem());
+    }
+
+    @Test
+    void zeroFixtureDigestUsesDefaultWhenHostFixtureDirectoryIsAbsent(@TempDir Path temporaryDirectory) {
+        System.setProperty("skycofl.fixtures", temporaryDirectory.resolve("fixtures").toString());
+        System.setProperty("coflnet.scenario.selected_id", "bazaar-menu");
+        System.setProperty("coflnet.scenario.fixture_sha256", "0".repeat(64));
+
+        var menu = FixtureLoader.selectedOrDefault(registries(), "bazaar-menu");
+
+        assertEquals("Bazaar ➜ Products", menu.title());
+        assertEquals("default:bazaar-menu", menu.digest());
     }
 
     @Test

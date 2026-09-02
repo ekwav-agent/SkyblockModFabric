@@ -34,6 +34,10 @@ final class ScenarioHostContract {
         return System.getProperty(PREFIX + "selected_id");
     }
 
+    static boolean fixtureSelected() {
+        return !"0".repeat(64).equals(System.getProperty(PREFIX + "fixture_sha256"));
+    }
+
     static Path resultPath() {
         String configured = System.getProperty(PREFIX + "result");
         if (configured == null || configured.isBlank()) {

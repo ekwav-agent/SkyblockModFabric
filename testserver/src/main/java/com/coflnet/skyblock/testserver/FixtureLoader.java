@@ -40,7 +40,8 @@ public final class FixtureLoader {
     public static FixtureMenu selectedOrDefault(HolderLookup.Provider registries, String scenarioId) {
         var configured = System.getProperty("skycofl.fixtures");
         String selected = ScenarioHostContract.selectedScenario();
-        if (configured == null || configured.isBlank() || (selected != null && !selected.equals(scenarioId))) {
+        if (configured == null || configured.isBlank() || !ScenarioHostContract.fixtureSelected()
+                || (selected != null && !selected.equals(scenarioId))) {
             return defaults(scenarioId);
         }
         Path directory = Path.of(configured).normalize();

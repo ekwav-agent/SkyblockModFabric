@@ -52,7 +52,9 @@ public final class ScenarioCatalog {
     }
 
     public List<Scenario> scenarios() {
-        return scenarios;
+        String selectedId = ScenarioHostContract.selectedScenario();
+        if (!ScenarioHostContract.automated() || selectedId == null || selectedId.isBlank()) return scenarios;
+        return List.of(require(selectedId));
     }
 
     public Scenario require(String id) {

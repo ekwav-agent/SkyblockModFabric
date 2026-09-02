@@ -3,6 +3,7 @@ package com.coflnet.skyblock.testserver;
 import com.coflnet.core.MenuClassifier;
 import com.coflnet.core.ScoreboardParser;
 import com.google.gson.JsonParser;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.InputStreamReader;
@@ -15,6 +16,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ScenarioCatalogContractTest {
+    @AfterEach
+    void clearScenarioSelection() {
+        System.clearProperty("coflnet.scenario.mode");
+        System.clearProperty("coflnet.scenario.selected_id");
+    }
+
     @Test
     void indexOrderAndBranchMetadataAreStable() throws Exception {
         var catalog = ScenarioCatalog.load();
@@ -50,6 +57,26 @@ class ScenarioCatalogContractTest {
                 ScenarioExpectations.PURSE_LINE, ScenarioExpectations.LOCATION_LINE});
         assertEquals(ScenarioExpectations.PURSE_LINE, values.left());
         assertEquals(ScenarioExpectations.LOCATION_LINE, values.right());
+    }
+
+    @Test
+    void automatedRunUsesAllScenariosWhenSelectionIsEmpty() {
+        var catalog = ScenarioCatalog.load();
+        System.setProperty("coflnet.scenario.mode", "automated");
+
+        var expected = catalog.scenarios();
+        System.setProperty("coflnet.scenario.selected_id", "");
+        assertEquals(expected, catalog.scenarios());
+    }
+
+    @Test
+    void automatedRunUsesOnlySelectedScenario() {
+        var catalog = ScenarioCatalog.load();
+        var selected = catalog.require("bazaar-menu");
+        System.setProperty("coflnet.scenario.mode", "automated");
+        System.setProperty("coflnet.scenario.selected_id", "bazaar-menu");
+
+        assertEquals(List.of(selected), catalog.scenarios());
     }
 
     @Test

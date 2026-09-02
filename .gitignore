@@ -32,6 +32,7 @@ bin/
 
 run/
 /testserver/logs/
+.coflnet-client-run/
 
 # java
 

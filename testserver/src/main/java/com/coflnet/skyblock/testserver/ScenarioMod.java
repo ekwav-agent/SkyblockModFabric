@@ -5,6 +5,7 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
@@ -57,6 +58,14 @@ public final class ScenarioMod implements ModInitializer {
             selectedFixtureDigest = null;
             syntheticOperator = automatedPending ? SyntheticOperator.create(server) : null;
             automatedState.reset(server.getTickCount());
+        });
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+            if (!ScenarioHostContract.automated() && director.current() == null) {
+                catalog.scenarios().stream()
+                        .filter(Scenario::manual)
+                        .findFirst()
+                        .ifPresent(scenario -> director.start(server, handler.player, scenario.id()));
+            }
         });
     }
 
