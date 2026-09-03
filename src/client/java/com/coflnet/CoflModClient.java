@@ -21,6 +21,7 @@ import CoflCore.commands.models.HotkeyRegister;
 import CoflCore.configuration.Config;
 import CoflCore.configuration.GUIType;
 import com.coflnet.gui.BinGUI;
+import com.coflnet.core.DescriptionEndpointOverride;
 import com.mojang.brigadier.CommandDispatcher;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
@@ -218,6 +219,7 @@ public class CoflModClient implements ClientModInitializer {
         Path configDir = FabricLoader.getInstance().getConfigDir();
         CoflCore cofl = new CoflCore();
         cofl.init(configDir);
+        DescriptionEndpointOverride.applySystemProperty();
         cofl.registerEventFile(new EventSubscribers());
         ensureTextTunnelsConfig();
 

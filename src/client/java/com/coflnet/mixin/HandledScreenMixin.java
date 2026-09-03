@@ -3,6 +3,7 @@ package com.coflnet.mixin;
 import CoflCore.handlers.DescriptionHandler;
 import com.coflnet.CoflModClient;
 import com.coflnet.config.TextWidgetPositionConfig;
+import com.coflnet.core.InfoDisplayLayout;
 import com.coflnet.gui.RenderUtils;
 import com.coflnet.models.TextElement;
 import com.google.gson.Gson;
@@ -239,20 +240,32 @@ public abstract class HandledScreenMixin extends Screen {
             combinedText.append(linesSnapshot.get(i));
         }
         
-        // Use custom position relative to GUI
-        int widgetX = leftPos + positionConfig.offsetX;
-        if(positionConfig.offsetX < 0) { // if it hasn't been respositioned move start over
-            widgetX = widgetX - maxWidth;
+        int widgetWidth = maxWidth + 10;
+        int widgetHeight = linesSnapshot.size() * Minecraft.getInstance().font.lineHeight;
+        int widgetX;
+        int widgetY;
+        if (positionConfig.offsetX == -5 && positionConfig.offsetY == 5) {
+            String title = ((AbstractContainerScreen<?>) (Object) this).getTitle().getString();
+            var container = new InfoDisplayLayout.Rect(leftPos, topPos, imageWidth, imageHeight);
+            var placement = InfoDisplayLayout.placeDefault(
+                    title, width, height, container, widgetWidth, widgetHeight);
+            widgetX = placement.x();
+            widgetY = placement.y();
+        } else {
+            widgetX = leftPos + positionConfig.offsetX;
+            if (positionConfig.offsetX < 0) {
+                widgetX -= maxWidth;
+            }
+            widgetY = topPos + positionConfig.offsetY;
         }
         currentMaxWidth = maxWidth;
-        int widgetY = topPos + positionConfig.offsetY;
         
         sideTextWidget = new MultiLineTextWidget(
                 widgetX, widgetY,
                 combinedText,
                 Minecraft.getInstance().font
         );
-        sideTextWidget.setSize(maxWidth + 10, linesSnapshot.size() * Minecraft.getInstance().font.lineHeight);
+        sideTextWidget.setSize(widgetWidth, widgetHeight);
         sideTextWidget.setAlpha(0.9f);
     }
 
