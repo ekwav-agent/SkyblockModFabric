@@ -67,6 +67,13 @@ tasks.named("test", Test) {
 	useJUnitPlatform()
 }
 
+tasks.register("runDescriptionStub", JavaExec) {
+	group = "verification"
+	description = "Runs the loopback-only deterministic description backend used by client rehearsal."
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.coflnet.core.DescriptionBackendStub"
+}
+
 processResources {
 	inputs.property "version", project.version
 	inputs.property "loader_version", project.loader_version
