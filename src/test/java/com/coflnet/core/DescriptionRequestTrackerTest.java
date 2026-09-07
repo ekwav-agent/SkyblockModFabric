@@ -28,6 +28,27 @@ class DescriptionRequestTrackerTest {
     }
 
     @Test
+    void returningToRunningInventoryReplacesSupersededQueuedWork() throws Exception {
+        var tracker = new Tracker(4);
+        var displays = new DescriptionDisplayState(4);
+        Object menu = new Object();
+        displays.activate("A", menu);
+        tracker.offer("A", "F1", "", menu);
+        var first = displays.beginRequest("A", menu);
+        assertTrue(tracker.start("A", "F1", "", menu));
+        tracker.offer("A", "F2", "", menu);
+        displays.beginRequest("A", menu);
+
+        assertEquals("ACCEPTED", tracker.offer("A", "F1", "", menu));
+        var latest = displays.beginRequest("A", menu);
+        assertFalse(displays.complete(first, List.of()).accepted());
+        tracker.finish("A", "F1", "", false);
+        assertFalse(tracker.start("A", "F2", "", menu));
+        assertTrue(tracker.start("A", "F1", "", menu));
+        assertTrue(displays.complete(latest, List.of()).appliesToActiveMenu());
+    }
+
+    @Test
     void failedRequestCanRetryAndOnlySuccessSuppressesAnotherUpload() throws Exception {
         var tracker = new Tracker(4);
         Object menu = new Object();

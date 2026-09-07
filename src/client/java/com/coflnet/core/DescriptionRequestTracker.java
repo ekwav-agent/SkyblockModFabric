@@ -30,7 +30,7 @@ public final class DescriptionRequestTracker {
 
     public synchronized Offer offer(String title, Fingerprint fingerprint, Object origin) {
         Slot slot = slots.computeIfAbsent(title, ignored -> new Slot());
-        if (fingerprint.equals(slot.running) && origin == slot.runningOrigin
+        if (slot.queued == null && fingerprint.equals(slot.running) && origin == slot.runningOrigin
                 || fingerprint.equals(slot.queued) && origin == slot.queuedOrigin) {
             return new Offer(Result.COALESCED_PENDING, List.of());
         }

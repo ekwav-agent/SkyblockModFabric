@@ -1521,7 +1521,7 @@ public class CoflModClient implements ClientModInitializer {
     }
 
     private static void scheduleDescriptionRequest(String title, DescriptionRequestSlot slot) {
-        if (slot.running != null || slot.scheduled != null) {
+        if (slot.queued == null || slot.running != null || slot.scheduled != null) {
             return;
         }
         long delay = Math.max(0, REFRESH_THROTTLE_MS - (System.currentTimeMillis() - slot.lastStartedAt));

@@ -16,6 +16,27 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class DescriptionFlowContractTest {
+    @Test
+    void drainingTheDescriptionQueueDoesNotScheduleAnEmptyRefresh() throws Exception {
+        Class<?> slotType = Class.forName("com.coflnet.CoflModClient$DescriptionRequestSlot");
+        var constructor = slotType.getDeclaredConstructor();
+        constructor.setAccessible(true);
+        Object slot = constructor.newInstance();
+        var schedule = CoflModClient.class.getDeclaredMethod(
+                "scheduleDescriptionRequest", String.class, slotType);
+        schedule.setAccessible(true);
+        var scheduled = slotType.getDeclaredField("scheduled");
+        scheduled.setAccessible(true);
+        try {
+            schedule.invoke(null, "empty-queue-regression", slot);
+            org.junit.jupiter.api.Assertions.assertNull(scheduled.get(slot),
+                    "an empty refresh leaves a completed future that blocks later scheduling");
+        } finally {
+            var future = (java.util.concurrent.Future<?>) scheduled.get(slot);
+            if (future != null) future.cancel(false);
+        }
+    }
+
     @AfterEach
     void resetEndpoint() {
         System.clearProperty(DescriptionEndpointOverride.PROPERTY);
