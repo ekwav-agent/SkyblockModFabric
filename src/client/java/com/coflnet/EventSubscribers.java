@@ -20,7 +20,6 @@ import static com.coflnet.Utils.ChatComponent;
 import CoflCore.CoflCore;
 import CoflCore.commands.models.ChatMessageData;
 import CoflCore.commands.models.FlipData;
-import CoflCore.handlers.DescriptionHandler;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.sounds.SoundSource;
@@ -219,18 +218,8 @@ public class EventSubscribers {
                     itemStacks.add(it.next().copy());
                 }
 
-                String[] visibleItems = CoflModClient.getItemIdsFromInventory(itemStacks);
-                String nbtString = CoflModClient.inventoryToNBT(itemStacks);
-                String currentUsername = Minecraft.getInstance().getUser().getName();
-                Position position = CoflModClient.posToUpload;
-
-                Thread.startVirtualThread(() -> DescriptionHandler.loadDescriptionForInventory(
-                        visibleItems,
-                        "Inventory",
-                        nbtString,
-                        currentUsername,
-                        position
-                ));
+                Thread.startVirtualThread(() ->
+                        CoflModClient.loadDescriptionsForItemsBlocking("Inventory", itemStacks));
             } catch (Exception e){
                 System.out.println(e);
             }

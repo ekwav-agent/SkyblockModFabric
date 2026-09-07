@@ -60,25 +60,17 @@ public class NewItemInChestMixin {
     @Inject(method = "handleContainerSetSlot", at = @At("TAIL"))
     private void onPacketReceive(ClientboundContainerSetSlotPacket packet, CallbackInfo ci) {
         try {
-            String itemTitle = packet.getItem().getCustomName() != null ? packet.getItem().getCustomName().getString() : "";
+            CoflModClient.onContainerSlotApplied(packet.getContainerId(), packet.getSlot());
+            String itemTitle = packet.getItem().getCustomName() == null
+                    ? "" : packet.getItem().getCustomName().getString();
+            CoflModClient.onDescriptionResultSlotApplied(
+                    packet.getContainerId(), packet.getSlot(), itemTitle);
             int slot = packet.getSlot();
             // Offer slots are 0-35; slot 40 may be the final divider update
             // that makes the full trade layout verifiable.
             if ((slot >= 0 && slot < 36) || slot == 40) {
                 TradePriceCache.requestCurrentTrade(packet.getContainerId());
                 CoflModClient.openTradeOverlayIfReady(packet.getContainerId());
-            } else if (!itemTitle.isEmpty() && (
-                    itemTitle.contains("Combine Items") // anvil result
-                    || itemTitle.equals("§aFlip Order") // bazaar order flip prices loaded
-            || itemTitle.contains("AUCTION FOR") // putting item in auction create
-            )) {
-                try {
-                    if (Minecraft.getInstance().gui.screen() instanceof AbstractContainerScreen<?> hs)
-                        CoflModClient.instance.loadDescriptionsForInv(hs);
-                    System.out.println("Trade Slot Update Packet received." + packet.getItem().getCustomName());
-                } catch (Exception inner) {
-                    System.out.println("[NewItemInChestMixin] loadDescriptionsForInv failed: " + inner.getMessage());
-                }
             }
 
             if (Minecraft.getInstance().player != null && Minecraft.getInstance().player.containerMenu != null) {
@@ -105,6 +97,7 @@ public class NewItemInChestMixin {
     /** Price the initial offer as soon as Minecraft has applied its complete contents. */
     @Inject(method = "handleContainerContent", at = @At("TAIL"))
     private void onContainerContent(ClientboundContainerSetContentPacket packet, CallbackInfo ci) {
+        CoflModClient.onContainerContentApplied(packet.containerId());
         TradePriceCache.requestCurrentTrade(packet.containerId());
         CoflModClient.openTradeOverlayIfReady(packet.containerId());
     }

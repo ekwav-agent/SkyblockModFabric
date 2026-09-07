@@ -65,8 +65,8 @@ public abstract class HandledScreenMixin extends Screen {
             // Fires whenever this container view goes away for ANY reason: an ESC/close AND when
             // Hypixel replaces it with another window (e.g. switching backpacks via the nav items,
             // which does not trigger onClose). Resend the outgoing storage contents so edits made
-            // after the on-open upload aren't lost on navigation. Deduped via lastNbtRequest, so an
-            // unchanged view is a no-op.
+            // after the on-open upload aren't lost on navigation. Successful title/content pairs
+            // are deduplicated, so an unchanged view is a no-op.
             CoflModClient.resendStorageOnClose(this);
         } catch (Exception e) {
             System.out.println("[HandledScreenMixin] resend on removed failed: " + e.getMessage());
@@ -79,22 +79,16 @@ public abstract class HandledScreenMixin extends Screen {
             // Load saved position
             positionConfig = TextWidgetPositionConfig.load();
 
-            // init to whatever text is present
-            DescriptionHandler.DescModification[] extraSlotDesc = CoflModClient.getExtraSlotDescMod();
+            AbstractContainerScreen<?> screen = (AbstractContainerScreen<?>) (Object) this;
+            String currentTitle = screen.getTitle().getString();
+            DescriptionHandler.DescModification[] extraSlotDesc =
+                    CoflModClient.selectInfoDisplay(currentTitle, screen.getMenu());
+            CoflModClient.watchDescriptionMenu(screen);
             updateText(extraSlotDesc);
-            String currentTitle = ((AbstractContainerScreen<?>) (Object) this).getTitle().getString();
-            if(sideTextWidget != null && !currentTitle.equals("Crafting")) {
-                sideTextWidget.setAlpha(0.3f); // make it transparent until properly loaded
-            }
             DescriptionHandler.setRefreshCallback((lines, title) -> {
                 try {
-                    // Ensure UI update runs on the client (render) thread
-                    Minecraft.getInstance().execute(() -> {
-                        try {
-                            updateText(CoflModClient.getExtraSlotDescMod());
-                        } catch (Exception ex) {
-                            System.out.println("[HandledScreenMixin] refresh callback (on client) failed: " + ex.getMessage());
-                        }
+                    CoflModClient.captureInfoDisplayResponse(title, screen.getMenu(), refreshed -> {
+                        updateText(refreshed);
                     });
                 } catch (Exception e) {
                     System.out.println("[HandledScreenMixin] refresh callback failed: " + e.getMessage());
@@ -495,7 +489,8 @@ public abstract class HandledScreenMixin extends Screen {
             }
 
             // Handle left-click for text interactions (existing functionality)
-            if (button == 0) { // Left mouse button
+            AbstractContainerScreen<?> screen = (AbstractContainerScreen<?>) (Object) this;
+            if (button == 0 && CoflModClient.isInfoDisplayCurrent(screen.getMenu())) { // Left mouse button
                 for (int i = 0; i < linesSnapshot.size(); i++) {
                     MutableComponent line = linesSnapshot.get(i);
                     int lineY = startY + (i * lineHeight);

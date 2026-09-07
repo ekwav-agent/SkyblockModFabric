@@ -13,7 +13,11 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 import CoflCore.classes.Position;
 import CoflCore.classes.Settings;
@@ -22,6 +26,8 @@ import CoflCore.configuration.Config;
 import CoflCore.configuration.GUIType;
 import com.coflnet.gui.BinGUI;
 import com.coflnet.core.DescriptionEndpointOverride;
+import com.coflnet.core.DescriptionDisplayState;
+import com.coflnet.core.DescriptionRequestTracker;
 import com.mojang.brigadier.CommandDispatcher;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
@@ -98,6 +104,7 @@ import net.minecraft.world.scores.DisplaySlot;
 import net.minecraft.world.scores.Objective;
 import net.minecraft.world.scores.Team;
 import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.world.inventory.ChestMenu;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.network.chat.Component;
@@ -111,7 +118,6 @@ import oshi.util.tuples.Pair;
 
 public class CoflModClient implements ClientModInitializer {
     public static final String targetVersion = "26.2";
-    public static final int InventorysizeWithOffHand = 5 * 9 + 1;
     // Private-use marker rendered with a zero-width custom font so text_Tunnels
     // can match it without showing a missing-glyph box in chat.
     static final String TEXT_TUNNELS_MESSAGE_PREFIX = "\uE000";
@@ -131,7 +137,6 @@ public class CoflModClient implements ClientModInitializer {
     public static Pair<String, String> lastScoreboardUploaded = new Pair<>("","0");
     private String username = "";
     private String lastCheckedUsername = ""; // Track last username to detect account switches
-    private static volatile String lastNbtRequest = "";
     private boolean uploadedScoreboard = false;
     private static boolean popupShown = false;
     public static Position posToUpload = null;
@@ -165,11 +170,21 @@ public class CoflModClient implements ClientModInitializer {
     private static volatile long lastScoreboardProcessMs = 0L;
     private static final long SCOREBOARD_PROCESS_INTERVAL_MS = 250L;
     
-    // Staggered refresh tracking: inventory name -> last request time
-    private static final Map<String, Long> lastRefreshTimePerInventory = new ConcurrentHashMap<>();
-    private static final Map<String, Long> lastDescriptionLoadRequestByMenu = new ConcurrentHashMap<>();
     private static final long REFRESH_THROTTLE_MS = 500; // 0.5 seconds minimum between requests
-    private static final long DESCRIPTION_LOAD_TRIGGER_DEBOUNCE_MS = 250;
+    private static final int DESCRIPTION_CACHE_CAPACITY = 32;
+    private static final Object DESCRIPTION_CORE_LOCK = new Object();
+    private static final DescriptionDisplayState DESCRIPTION_DISPLAYS =
+            new DescriptionDisplayState(DESCRIPTION_CACHE_CAPACITY);
+    private static final DescriptionRequestTracker DESCRIPTION_REQUEST_TRACKER =
+            new DescriptionRequestTracker(DESCRIPTION_CACHE_CAPACITY);
+    private static final ThreadLocal<DescriptionDisplayState.Request> ACTIVE_DESCRIPTION_REQUEST =
+            new ThreadLocal<>();
+    private static final ThreadLocal<Boolean> DESCRIPTION_RESPONSE_CAPTURED = new ThreadLocal<>();
+    private static final ScheduledExecutorService descriptionRefreshExecutor =
+            Executors.newSingleThreadScheduledExecutor(
+                    Thread.ofVirtual().name("cofl-description-", 0).factory());
+    private static final LinkedHashMap<String, DescriptionRequestSlot> descriptionRequests =
+            new LinkedHashMap<>(16, 0.75f, true);
     private static final AtomicBoolean connectionStartInProgress = new AtomicBoolean(false);
     private static final ExecutorService connectionLifecycleExecutor =
     Executors.newSingleThreadExecutor(Thread.ofVirtual().name("cofl-connection-", 0).factory());
@@ -179,6 +194,21 @@ public class CoflModClient implements ClientModInitializer {
     private static volatile String[] pendingUntrustedConnectArgs;
     private static volatile long pendingUntrustedConnectExpiresAtMs;
     private static volatile ServerContext currentServerContext = ServerContext.UNKNOWN;
+
+    private record DescriptionRequest(
+            String title,
+            String[] visibleItems,
+            String nbt,
+            String userName,
+            Position position,
+            DescriptionDisplayState.Request displayRequest) {}
+
+    private static final class DescriptionRequestSlot {
+        private DescriptionRequest queued;
+        private DescriptionRequest running;
+        private long lastStartedAt;
+        private ScheduledFuture<?> scheduled;
+    }
     
     // Maps new UUIDs to original UUID when items update with new UUIDs but same title
     // This allows finding descriptions loaded for the original UUID when hovering an item with updated UUID
@@ -300,6 +330,7 @@ public class CoflModClient implements ClientModInitializer {
         });
 
         ClientPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+            clearDescriptionSession();
             com.coflnet.config.TradeGuiManager.clearAccountTier();
             ServerContext detectedServerContext = detectServerContext(null);
             applyServerContext(detectedServerContext);
@@ -324,6 +355,7 @@ public class CoflModClient implements ClientModInitializer {
         });
 
         ClientPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+            clearDescriptionSession();
             com.coflnet.config.TradeGuiManager.clearAccountTier();
             applyServerContext(ServerContext.UNKNOWN);
             WSClientWrapper wrapper = CoflCore.Wrapper;
@@ -443,9 +475,8 @@ public class CoflModClient implements ClientModInitializer {
         });
 
         ScreenEvents.AFTER_INIT.register((client, screen, scaledWidth, scaledHeight) -> {
-            if (screen instanceof AbstractContainerScreen<?> hs) {
+            if (screen instanceof AbstractContainerScreen<?>) {
                 knownIds.clear();
-                loadDescriptionsForInv(hs);
                 if(!uploadedScoreboard)
                 {
                     uploadScoreboard();
@@ -1370,142 +1401,76 @@ public class CoflModClient implements ClientModInitializer {
     }
 
     public void loadDescriptionsForInv(AbstractContainerScreen screen) {
-        if (screen == null || !shouldTriggerDescriptionLoad(screen)) {
+        Minecraft client = Minecraft.getInstance();
+        if (screen == null || client.player == null) {
             return;
         }
 
-        String menuSlot = Minecraft.getInstance().player.getInventory().getItem(8).getComponents().toString();
+        String menuSlot = client.player.getInventory().getItem(8).getComponents().toString();
         if (!menuSlot.contains("minecraft:custom_data=>{id:\"SKYBLOCK_MENU\"}")
             && !menuSlot.contains("Scaffolding") && !menuSlot.contains("Quiver")
             && !menuSlot.contains("Your Score Summary") // dungeon completion
             )
             return;
-        Thread.startVirtualThread(() -> {
-            NonNullList<ItemStack> itemStacks = screen.getMenu().getItems();
-            String title = screen.getTitle().getString();
-            try {
-                Thread.sleep(100);
-                for (int i = 0; i < 20; i++) {
-                    if(itemStacks.size() <= InventorysizeWithOffHand || !itemStacks.get(itemStacks.size() - InventorysizeWithOffHand).isEmpty())
-                        break;
-                    Thread.sleep(50); // wait for the screen to load
-                    System.out.println("Waiting for item stacks to load...");
-                    itemStacks = screen.getMenu().getItems();
-                }
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-            try {
-                AbstractContainerScreen currentScreen = Minecraft.getInstance().gui.screen() instanceof AbstractContainerScreen ? (AbstractContainerScreen) Minecraft.getInstance().gui.screen() : null;
-                if (currentScreen == null || currentScreen.getMenu() != screen.getMenu()){
-                    System.out.println("Inventory changed already, not refreshing descriptions");
-                    return; // inventory changed, don't refresh
-                }
-                String[] visibleItems = getItemIdsFromInventory(itemStacks);
-                loadDescriptionsForItems(title, itemStacks);
-                boolean refresh = false;
-                if(title.contains("Auctions"))
-                {
-                    for (ItemStack itemStack : itemStacks) {
-                        if(itemStack.get(DataComponents.LORE) == null)
-                            continue;
-                        for (Component line : itemStack.get(DataComponents.LORE).lines()) {
-                            if(line.getString().contains("Refreshing..."))
-                            {
-                                refresh = true;
-                                break;
-                            }
-                        }
-                    }
-                    if(refresh)
-                        Thread.sleep(500); // wait extra for names to load
-                }
-                Thread.sleep(1000);
-                // check all items in the inventory for descriptions
-                String[] itemIds = getItemIdsFromInventory(screen.getMenu().getItems());
-                List<String> visibleList = Arrays.asList(visibleItems);
-                for (String itemId : itemIds) {
-                    if (!visibleList.contains(itemId) && !itemId.startsWith("EMPTY_SLOT_")) {
-                        refresh = true;
-                        break;
-                    }
-                }
-                if (refresh) {
-                    currentScreen = Minecraft.getInstance().gui.screen() instanceof AbstractContainerScreen ? (AbstractContainerScreen) Minecraft.getInstance().gui.screen() : null;
-                    if (currentScreen == null || currentScreen.getMenu() != screen.getMenu()){
-                        System.out.println("Inventory changed, not refreshing descriptions");
-                        return; // inventory changed, don't refresh 
-                        }
-                    if(!title.equals(screen.getTitle().getString()))
-                    {
-                        System.out.println("Title changed, not refreshing descriptions");
-                        return;
-                    }
-                    System.out.println("Refreshing descriptions for inventory: " + title);
-                    loadDescriptionsForItems(title, itemStacks);
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-                System.out.println("Failed to load descriptions for inventory: " + e + " "
-                        + inventoryToNBT(itemStacks));
-            }
-        });
+        if (!(client.gui.screen() instanceof AbstractContainerScreen<?> currentScreen)
+                || currentScreen.getMenu() != screen.getMenu()) {
+            return;
+        }
+        loadDescriptionsForItems(
+                screen.getTitle().getString(), screen.getMenu().getItems(), screen.getMenu());
     }
 
-    private static boolean shouldTriggerDescriptionLoad(AbstractContainerScreen screen) {
-        String title = screen.getTitle().getString();
-        String menuKey = title + "#" + System.identityHashCode(screen.getMenu());
-        long now = System.currentTimeMillis();
-        Long previous = lastDescriptionLoadRequestByMenu.put(menuKey, now);
-        if (previous != null && (now - previous) < DESCRIPTION_LOAD_TRIGGER_DEBOUNCE_MS) {
-            return false;
+    public static void watchDescriptionMenu(AbstractContainerScreen<?> screen) {
+        int incrementalSlots = screen.getMenu() instanceof ChestMenu chestMenu
+                ? chestMenu.getRowCount() * 9 : 0;
+        DESCRIPTION_DISPLAYS.watchContainer(
+                screen.getMenu(), screen.getMenu().containerId, incrementalSlots);
+    }
+
+    public static void onContainerContentApplied(int containerId) {
+        AbstractContainerScreen<?> screen = currentContainerScreen(containerId);
+        if (instance != null && screen != null
+                && DESCRIPTION_DISPLAYS.fullContentApplied(screen.getMenu(), containerId)) {
+            instance.loadDescriptionsForInv(screen);
         }
-        return true;
+    }
+
+    public static void onContainerSlotApplied(int containerId, int slot) {
+        AbstractContainerScreen<?> screen = currentContainerScreen(containerId);
+        if (instance != null && screen != null
+                && DESCRIPTION_DISPLAYS.slotApplied(screen.getMenu(), containerId, slot)) {
+            instance.loadDescriptionsForInv(screen);
+        }
+    }
+
+    public static void onDescriptionResultSlotApplied(int containerId, int slot, String itemTitle) {
+        AbstractContainerScreen<?> screen = currentContainerScreen(containerId);
+        if (instance != null && screen != null && DESCRIPTION_DISPLAYS.resultSlotApplied(
+                screen.getMenu(), containerId, slot, itemTitle)) {
+            instance.loadDescriptionsForInv(screen);
+        }
+    }
+
+    private static AbstractContainerScreen<?> currentContainerScreen(int containerId) {
+        if (!(Minecraft.getInstance().gui.screen() instanceof AbstractContainerScreen<?> screen)
+                || screen.getMenu().containerId != containerId) {
+            return null;
+        }
+        return screen;
     }
 
     public static void loadDescriptionsForItems(String title, NonNullList<ItemStack> items) {
+        loadDescriptionsForItems(title, items, null);
+    }
+
+    private static void loadDescriptionsForItems(
+            String title, NonNullList<ItemStack> items, Object menuIdentity) {
         String userName = Minecraft.getInstance().getUser().getName();
-        String nbtString = inventoryToNBT(items);
-        if (nbtString.equals(lastNbtRequest)) {
-            return;
-        }
-        lastNbtRequest = nbtString;
-
-        // Check if we should throttle this request
-        long currentTime = System.currentTimeMillis();
-        Long lastRefreshTime = lastRefreshTimePerInventory.get(title);
-
-        if (lastRefreshTime != null && (currentTime - lastRefreshTime) < REFRESH_THROTTLE_MS) {
-            // Too soon since last refresh, schedule the request to be made after the throttle period
-            long delayMs = REFRESH_THROTTLE_MS - (currentTime - lastRefreshTime);
-            System.out.println("Throttling refresh for inventory: " + title + " (wait " + delayMs + "ms)");
-            Thread.startVirtualThread(() -> {
-                try {
-                    Thread.sleep(delayMs);
-                    // Request with current inventory state (in case it updated)
-                    NonNullList<ItemStack> currentItems = NonNullList.create();
-                    AbstractContainerScreen currentScreen = Minecraft.getInstance().gui.screen() instanceof AbstractContainerScreen 
-                        ? (AbstractContainerScreen) Minecraft.getInstance().gui.screen() 
-                        : null;
-                    if (currentScreen != null && currentScreen.getTitle().getString().equals(title)) {
-                        currentItems.addAll(currentScreen.getMenu().getItems());
-                    } else {
-                        // Inventory changed, use the items we have
-                        currentItems = items;
-                    }
-                    String currentNbt = inventoryToNBT(currentItems);
-                    fetchDescriptionsForItems(title, currentItems, currentNbt, userName);
-                    lastRefreshTimePerInventory.put(title, System.currentTimeMillis());
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            });
-            return;
-        }
-
-        // Update last refresh time and make the request
-        lastRefreshTimePerInventory.put(title, currentTime);
-        fetchDescriptionsForItems(title, items, nbtString, userName);
+        NonNullList<ItemStack> snapshot = copyItems(items);
+        String nbtString = inventoryToNBT(snapshot);
+        var request = new DescriptionRequest(title, getItemIdsFromInventory(snapshot), nbtString,
+                userName, posToUpload, null);
+        enqueueDescriptionRequest(request, menuIdentity);
     }
 
     /**
@@ -1516,23 +1481,124 @@ public class CoflModClient implements ClientModInitializer {
      */
     public static void loadDescriptionsForItemsBlocking(String title, NonNullList<ItemStack> items) {
         String userName = Minecraft.getInstance().getUser().getName();
-        String nbtString = inventoryToNBT(items);
-        fetchDescriptionsForItems(title, items, nbtString, userName);
+        NonNullList<ItemStack> snapshot = copyItems(items);
+        String nbtString = inventoryToNBT(snapshot);
+        fetchDescriptionsForItems(new DescriptionRequest(title, getItemIdsFromInventory(snapshot),
+                nbtString, userName, posToUpload, null));
     }
 
-    private static void fetchDescriptionsForItems(
-            String title,
-            NonNullList<ItemStack> items,
-            String nbtString,
-            String userName) {
-        String[] visibleItems = getItemIdsFromInventory(items);
-        DescriptionHandler.loadDescriptionForInventory(
-                visibleItems,
-                title,
-                nbtString,
-                userName,
-                posToUpload
-        );
+    private static NonNullList<ItemStack> copyItems(List<ItemStack> items) {
+        NonNullList<ItemStack> snapshot = NonNullList.create();
+        for (ItemStack item : items) {
+            snapshot.add(item.copy());
+        }
+        return snapshot;
+    }
+
+    private static void enqueueDescriptionRequest(DescriptionRequest request, Object menuIdentity) {
+        synchronized (descriptionRequests) {
+            DescriptionRequestSlot slot = descriptionRequests.computeIfAbsent(
+                    request.title(), ignored -> new DescriptionRequestSlot());
+            DescriptionRequestTracker.Fingerprint fingerprint = descriptionFingerprint(request);
+            DescriptionRequestTracker.Offer offer =
+                    DESCRIPTION_REQUEST_TRACKER.offer(request.title(), fingerprint, menuIdentity);
+            if (offer.result() == DescriptionRequestTracker.Result.COALESCED_SUCCESS) {
+                if (DESCRIPTION_DISPLAYS.confirmCached(request.title(), menuIdentity)) {
+                    return;
+                }
+                DESCRIPTION_REQUEST_TRACKER.forgetSuccessful(request.title(), fingerprint);
+                offer = DESCRIPTION_REQUEST_TRACKER.offer(request.title(), fingerprint, menuIdentity);
+            }
+            if (offer.result() == DescriptionRequestTracker.Result.COALESCED_PENDING) {
+                return;
+            }
+            removeEvictedDescriptionRequests(offer.evictedTitles());
+            slot.queued = new DescriptionRequest(request.title(), request.visibleItems(), request.nbt(),
+                    request.userName(), request.position(),
+                    DESCRIPTION_DISPLAYS.beginRequest(request.title(), menuIdentity));
+            scheduleDescriptionRequest(request.title(), slot);
+        }
+    }
+
+    private static void scheduleDescriptionRequest(String title, DescriptionRequestSlot slot) {
+        if (slot.running != null || slot.scheduled != null) {
+            return;
+        }
+        long delay = Math.max(0, REFRESH_THROTTLE_MS - (System.currentTimeMillis() - slot.lastStartedAt));
+        slot.scheduled = descriptionRefreshExecutor.schedule(
+                () -> runDescriptionRequest(title), delay, TimeUnit.MILLISECONDS);
+    }
+
+    private static void runDescriptionRequest(String title) {
+        DescriptionRequest request;
+        synchronized (descriptionRequests) {
+            DescriptionRequestSlot slot = descriptionRequests.get(title);
+            if (slot == null || slot.queued == null) {
+                return;
+            }
+            request = slot.queued;
+            if (!DESCRIPTION_REQUEST_TRACKER.start(
+                    title, descriptionFingerprint(request), request.displayRequest().menuIdentity())) {
+                slot.queued = null;
+                slot.scheduled = null;
+                return;
+            }
+            slot.queued = null;
+            slot.scheduled = null;
+            slot.running = request;
+            slot.lastStartedAt = System.currentTimeMillis();
+        }
+
+        boolean succeeded = false;
+        try {
+            succeeded = fetchDescriptionsForItems(request);
+        } catch (RuntimeException exception) {
+            System.out.println("Failed to refresh descriptions for " + title + ": " + exception.getMessage());
+        } finally {
+            finishDescriptionRequest(title, request, succeeded);
+        }
+    }
+
+    private static void finishDescriptionRequest(
+            String title, DescriptionRequest request, boolean succeeded) {
+        synchronized (descriptionRequests) {
+            DescriptionRequestSlot slot = descriptionRequests.get(title);
+            if (slot == null || slot.running != request) {
+                return;
+            }
+            slot.running = null;
+            DESCRIPTION_REQUEST_TRACKER.finish(title, descriptionFingerprint(request), succeeded);
+            scheduleDescriptionRequest(title, slot);
+        }
+    }
+
+    private static DescriptionRequestTracker.Fingerprint descriptionFingerprint(DescriptionRequest request) {
+        String position = request.position() == null ? "" : new Gson().toJson(request.position());
+        return new DescriptionRequestTracker.Fingerprint(request.nbt(), position);
+    }
+
+    private static void removeEvictedDescriptionRequests(List<String> evictedTitles) {
+        for (String evictedTitle : evictedTitles) {
+            DescriptionRequestSlot evicted = descriptionRequests.remove(evictedTitle);
+            if (evicted != null && evicted.scheduled != null) {
+                evicted.scheduled.cancel(false);
+            }
+        }
+    }
+
+    private static boolean fetchDescriptionsForItems(DescriptionRequest request) {
+        synchronized (DESCRIPTION_CORE_LOCK) {
+            ACTIVE_DESCRIPTION_REQUEST.set(request.displayRequest());
+            DESCRIPTION_RESPONSE_CAPTURED.set(false);
+            try {
+                DescriptionHandler.loadDescriptionForInventory(
+                        request.visibleItems(), request.title(), request.nbt(), request.userName(), request.position());
+                return Boolean.TRUE.equals(DESCRIPTION_RESPONSE_CAPTURED.get());
+            } finally {
+                ACTIVE_DESCRIPTION_REQUEST.remove();
+                DESCRIPTION_RESPONSE_CAPTURED.remove();
+            }
+        }
     }
 
     /**
@@ -1540,7 +1606,8 @@ public class CoflModClient implements ClientModInitializer {
      * move items in or out afterwards (e.g. putting a weapon into a backpack). Those slot changes are
      * not re-uploaded for storage menus, so the stored view would be stale. When such a container is
      * closed, re-read its final contents and dispatch again. {@link #loadDescriptionsForItems} dedups
-     * via {@code lastNbtRequest}, so this is a no-op when nothing changed since the last upload.
+     * successful requests by title, contents, and storage position, so this is a no-op when nothing
+     * changed.
      * Must run before {@code posToUpload} is cleared so island-chest positions are still included.
      */
     public static void resendStorageOnClose(Object screen) {
@@ -1549,7 +1616,7 @@ public class CoflModClient implements ClientModInitializer {
         String title = hs.getTitle().getString();
         if (!isStorageChest(title))
             return;
-        loadDescriptionsForItems(title, hs.getMenu().getItems());
+        loadDescriptionsForItems(title, hs.getMenu().getItems(), hs.getMenu());
     }
 
     /**
@@ -1926,6 +1993,84 @@ public class CoflModClient implements ClientModInitializer {
 
     public static DescriptionHandler.DescModification[] getExtraSlotDescMod(){
         return DescriptionHandler.getInfoDisplay();
+    }
+
+    /** Selects a title-scoped immutable preview before any inventory or network wait begins. */
+    public static DescriptionHandler.DescModification[] selectInfoDisplay(String title, Object menuIdentity) {
+        return toDescriptionLines(DESCRIPTION_DISPLAYS.activate(title, menuIdentity).lines());
+    }
+
+    public static boolean isInfoDisplayCurrent(Object menuIdentity) {
+        return DESCRIPTION_DISPLAYS.isActiveAndVerified(menuIdentity);
+    }
+
+    /** Captures the core's global response while its originating request still owns the core lock. */
+    public static void captureInfoDisplayResponse(
+            String callbackTitle,
+            Object menuIdentity,
+            Consumer<DescriptionHandler.DescModification[]> changedDisplay) {
+        DescriptionDisplayState.Request request = ACTIVE_DESCRIPTION_REQUEST.get();
+        if (request == null || !request.title().equals(callbackTitle)) {
+            return;
+        }
+        List<DescriptionDisplayState.Line> response = fromDescriptionLines(DescriptionHandler.getInfoDisplay());
+        DescriptionDisplayState.Completion completion = DESCRIPTION_DISPLAYS.complete(request, response);
+        if (completion.accepted()) {
+            DESCRIPTION_RESPONSE_CAPTURED.set(true);
+        }
+        if (!completion.appliesToActiveMenu() || request.menuIdentity() != menuIdentity) {
+            return;
+        }
+        Minecraft.getInstance().execute(() -> {
+            if (!DESCRIPTION_DISPLAYS.isActive(request)) {
+                return;
+            }
+            if (completion.changed()) {
+                changedDisplay.accept(toDescriptionLines(completion.lines()));
+            }
+        });
+    }
+
+    private static List<DescriptionDisplayState.Line> fromDescriptionLines(
+            DescriptionHandler.DescModification[] lines) {
+        if (lines == null || lines.length == 0) {
+            return List.of();
+        }
+        List<DescriptionDisplayState.Line> snapshot = new ArrayList<>(lines.length);
+        for (DescriptionHandler.DescModification line : lines) {
+            snapshot.add(new DescriptionDisplayState.Line(line.type, line.value, line.line));
+        }
+        return List.copyOf(snapshot);
+    }
+
+    private static DescriptionHandler.DescModification[] toDescriptionLines(
+            List<DescriptionDisplayState.Line> lines) {
+        DescriptionHandler handler = new DescriptionHandler();
+        DescriptionHandler.DescModification[] result =
+                new DescriptionHandler.DescModification[lines.size()];
+        for (int i = 0; i < lines.size(); i++) {
+            DescriptionDisplayState.Line line = lines.get(i);
+            DescriptionHandler.DescModification converted = handler.new DescModification();
+            converted.type = line.type();
+            converted.value = line.value();
+            converted.line = line.line();
+            result[i] = converted;
+        }
+        return result;
+    }
+
+    private static void clearDescriptionSession() {
+        DESCRIPTION_DISPLAYS.clearSession();
+        synchronized (descriptionRequests) {
+            for (DescriptionRequestSlot slot : descriptionRequests.values()) {
+                if (slot.scheduled != null) {
+                    slot.scheduled.cancel(false);
+                }
+            }
+            descriptionRequests.clear();
+            DESCRIPTION_REQUEST_TRACKER.clear();
+        }
+        uuidToOriginalUuid.clear();
     }
 
     public static void setHotKeys(HotkeyRegister[] keys) {
@@ -2340,6 +2485,9 @@ public class CoflModClient implements ClientModInitializer {
         if (serverContext == null) {
             return;
         }
+        if (currentServerContext != serverContext) {
+            clearDescriptionSession();
+        }
         currentServerContext = serverContext;
         Config.ServerContext = serverContext.requestValue;
     }
@@ -2420,6 +2568,7 @@ public class CoflModClient implements ClientModInitializer {
         // Check if username has changed
         if (!currentUsername.equals(lastCheckedUsername) && !lastCheckedUsername.isEmpty()) {
             System.out.println("Detected account switch from " + lastCheckedUsername + " to " + currentUsername);
+            clearDescriptionSession();
             
             // If CoflCore is running, we need to restart it with the new username
             WSClientWrapper wrapper = CoflCore.Wrapper;

@@ -23,10 +23,10 @@ separate host-owned gate.
 
 ## Regression baseline
 
-The reserved comparison command targets `ScenarioServerContractTest`. That test uses only APIs
-already available on pinned base `f766e850023edbc63fbb4747523154cd2f5e618e`, so it compiles there
-and fails its assertions because `settings.gradle` has no `testserver` project and the
-`bazaar-orders` scenario contract is absent. The patched command passed locally. The trusted host,
-not the mutable implementation workspace, owns the exact-base execution and evidence.
-
-On the pinned base commit these tests fail during `compileTestJava`, because the asserted `com.coflnet.core` classes do not exist and the logic is still inline in `CoflModClient`. With this extraction, the core regression suite compiles and passes under `./gradlew --no-daemon test`.
+The reserved comparison command loads a real response through the loopback description backend, then
+selects a different container title through the production adapter. It compiles and executes against
+pinned base `328d211cbf4dd9d5b9082b476af20d55f05c12b5`, where it fails because container initialization
+returns the previous global info display. The patch returns an empty title-scoped cache miss and passed
+locally. The trusted host, not the mutable implementation workspace, owns the exact-base execution and
+evidence. Position-sensitive deduplication and evicted-display retry remain covered by the ordinary
+focused state tests.
